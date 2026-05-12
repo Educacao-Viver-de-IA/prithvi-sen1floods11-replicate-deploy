@@ -1,0 +1,132 @@
+import base64
+import io
+import json
+import os
+import time
+
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_HOME"] = "/src/weights"
+
+import numpy as np
+import torch
+from cog import BasePredictor, Input, Path
+from PIL import Image
+
+WEIGHTS_DIR = "/src/weights/prithvi-sen1floods11"
+CHECKPOINT = f"{WEIGHTS_DIR}/Prithvi-EO-V2-300M-TL-Sen1Floods11.pt"
+
+
+class Predictor(BasePredictor):
+    def setup(self):
+        t0 = time.time()
+        print(f"[setup] WEIGHTS_DIR={WEIGHTS_DIR}", flush=True)
+        try:
+            print(f"[setup] dir: {sorted(os.listdir(WEIGHTS_DIR))[:15]}", flush=True)
+        except Exception as e:
+            print(f"[setup] err: {e}", flush=True)
+        print(f"[setup] cuda: {torch.cuda.is_available()}", flush=True)
+
+        print(f"[setup] importing terratorch... (t={time.time()-t0:.1f}s)", flush=True)
+        from terratorch.tasks import SemanticSegmentationTask
+        self.SemanticSegmentationTask = SemanticSegmentationTask
+
+        print(f"[setup] load checkpoint... (t={time.time()-t0:.1f}s)", flush=True)
+        try:
+            self.task = SemanticSegmentationTask.load_from_checkpoint(
+                CHECKPOINT,
+                map_location="cuda" if torch.cuda.is_available() else "cpu",
+            )
+        except Exception as e:
+            print(f"[setup] load_from_checkpoint err: {e}", flush=True)
+            raise
+
+        self.task.eval()
+        if torch.cuda.is_available():
+            self.task = self.task.cuda()
+        print(f"[setup] DONE (t={time.time()-t0:.1f}s)", flush=True)
+
+    def _load_image(self, image_path: Path, image_size: int) -> torch.Tensor:
+        path_str = str(image_path)
+        arr = None
+        if path_str.lower().endswith((".tif", ".tiff")):
+            try:
+                import rasterio
+                with rasterio.open(path_str) as src:
+                    arr = src.read().astype(np.float32)
+            except Exception as e:
+                print(f"[predict] rasterio fail: {e}", flush=True)
+
+        if arr is None:
+            pil = Image.open(image_path)
+            if pil.mode != "RGB":
+                pil = pil.convert("RGB")
+            arr = np.asarray(pil, dtype=np.float32).transpose(2, 0, 1)
+
+        if arr.shape[0] < 6:
+            pad = np.repeat(arr[-1:], 6 - arr.shape[0], axis=0)
+            arr = np.concatenate([arr, pad], axis=0)
+        elif arr.shape[0] > 6:
+            arr = arr[:6]
+
+        if arr.max() > 255:
+            arr = arr / 10000.0
+        elif arr.max() > 1.0:
+            arr = arr / 255.0
+        arr = np.clip(arr, 0.0, 1.0)
+
+        import torch.nn.functional as F
+        tensor = torch.from_numpy(arr).unsqueeze(0)
+        tensor = F.interpolate(tensor, size=(image_size, image_size), mode="bilinear", align_corners=False)
+        tensor = tensor.unsqueeze(2)
+        return tensor
+
+    def predict(
+        self,
+        image: Path = Input(description="GeoTIFF Sentinel-2 6-band ou imagem RGB (auto-pad)."),
+        image_size: int = Input(default=512, ge=128, le=1024),
+        return_format: str = Input(default="summary", choices=["summary", "mask_png"]),
+    ) -> str:
+        device = next(self.task.parameters()).device
+        tensor = self._load_image(image, image_size).to(device, dtype=torch.float32)
+
+        with torch.no_grad():
+            output = self.task(tensor)
+
+        if isinstance(output, dict):
+            logits = output.get("output", output.get("logits", next(iter(output.values()))))
+        elif isinstance(output, (list, tuple)):
+            logits = output[0]
+        else:
+            logits = output
+
+        if logits.dim() == 4:
+            pred = logits.argmax(dim=1).squeeze(0).cpu().numpy()
+        else:
+            pred = logits.squeeze().cpu().numpy()
+
+        total_pixels = pred.size
+        flood_pixels = int(np.sum(pred == 1))
+        dry_pixels = int(np.sum(pred == 0))
+        flood_pct = float(flood_pixels / total_pixels * 100)
+
+        result = {
+            "model": "prithvi-eo-2-300m-tl-sen1floods11",
+            "image_size": image_size,
+            "total_pixels": int(total_pixels),
+            "flood_pixels": flood_pixels,
+            "dry_pixels": dry_pixels,
+            "flood_pct": round(flood_pct, 2),
+            "interpretation": "major_flooding" if flood_pct > 30 else ("moderate_flooding" if flood_pct > 5 else "minimal_or_no_flooding"),
+        }
+
+        if return_format == "mask_png":
+            mask_img = np.zeros((pred.shape[0], pred.shape[1], 3), dtype=np.uint8)
+            mask_img[pred == 1] = [0, 100, 255]  # azul = água/inundação
+            mask_img[pred == 0] = [50, 50, 50]
+            pil_mask = Image.fromarray(mask_img)
+            buf = io.BytesIO()
+            pil_mask.save(buf, format="PNG")
+            result["mask_png_base64"] = base64.b64encode(buf.getvalue()).decode()
+
+        return json.dumps(result, ensure_ascii=False)
