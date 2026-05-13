@@ -32,14 +32,44 @@ class Predictor(BasePredictor):
         self.SemanticSegmentationTask = SemanticSegmentationTask
 
         print(f"[setup] load checkpoint... (t={time.time()-t0:.1f}s)", flush=True)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        self.task = None
         try:
-            self.task = SemanticSegmentationTask.load_from_checkpoint(
-                CHECKPOINT,
-                map_location="cuda" if torch.cuda.is_available() else "cpu",
-            )
+            self.task = SemanticSegmentationTask.load_from_checkpoint(CHECKPOINT, map_location=device)
+            print(f"[setup] load_from_checkpoint OK", flush=True)
         except Exception as e:
-            print(f"[setup] load_from_checkpoint err: {e}", flush=True)
-            raise
+            print(f"[setup] load_from_checkpoint falhou ({type(e).__name__}: {e})", flush=True)
+
+        if self.task is None:
+            print(f"[setup] state_dict fallback...", flush=True)
+            sd = torch.load(CHECKPOINT, map_location="cpu", weights_only=False)
+            print(f"[setup] checkpoint keys: {list(sd.keys())[:10] if isinstance(sd, dict) else type(sd)}", flush=True)
+            try:
+                self.task = SemanticSegmentationTask(
+                    model_args={
+                        "backbone": "prithvi_eo_v2_300_tl",
+                        "decoder": "UperNetDecoder",
+                        "decoder_channels": 256,
+                        "decoder_scale_modules": True,
+                        "num_classes": 2,
+                        "bands": ["BLUE", "GREEN", "RED", "NIR_NARROW", "SWIR_1", "SWIR_2"],
+                        "head_dropout": 0.1,
+                        "head_final_act": "torch.nn.ReLU",
+                        "necks": [{"name": "SelectIndices", "indices": [5, 11, 17, 23]}, {"name": "ReshapeTokensToImage"}],
+                    },
+                    loss="ce",
+                    ignore_index=-1,
+                    lr=1e-4,
+                    optimizer="AdamW",
+                    plot_on_val=False,
+                )
+                state = sd.get("state_dict", sd)
+                missing, unexpected = self.task.load_state_dict(state, strict=False)
+                print(f"[setup] state_dict load: {len(missing)} missing, {len(unexpected)} unexpected", flush=True)
+            except Exception as e2:
+                print(f"[setup] state_dict fallback FAILED: {type(e2).__name__}: {e2}", flush=True)
+                raise
 
         self.task.eval()
         if torch.cuda.is_available():
