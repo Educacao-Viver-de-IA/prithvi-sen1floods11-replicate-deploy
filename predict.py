@@ -73,16 +73,12 @@ class Predictor(BasePredictor):
             print(f"[setup] checkpoint keys: {list(sd.keys())[:10] if isinstance(sd, dict) else type(sd)}", flush=True)
             try:
                 self.task = SemanticSegmentationTask(
-                    model_factory="EncoderDecoderFactory",  # ← OBRIGATÓRIO
+                    model_factory="EncoderDecoderFactory",
                     model_args={
                         "backbone": "prithvi_eo_v2_300_tl",
                         "decoder": "UperNetDecoder",
                         "decoder_channels": 256,
-                        "decoder_scale_modules": True,
                         "num_classes": 2,
-                        "bands": ["BLUE", "GREEN", "RED", "NIR_NARROW", "SWIR_1", "SWIR_2"],
-                        "head_dropout": 0.1,
-                        "head_final_act": "torch.nn.ReLU",
                         "necks": [{"name": "SelectIndices", "indices": [5, 11, 17, 23]}, {"name": "ReshapeTokensToImage"}],
                     },
                     loss="ce",
