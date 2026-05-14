@@ -152,8 +152,14 @@ class Predictor(BasePredictor):
         device = next(self.task.parameters()).device
         tensor = self._load_image(image, image_size).to(device, dtype=torch.float32)
 
-        with torch.no_grad():
-            output = self.task(tensor)
+        self.task.eval()
+        for m in self.task.modules():
+            m.eval()
+        print(f"[predict] task.training={self.task.training}", flush=True)
+
+        with torch.inference_mode():
+            inner_model = getattr(self.task, 'model', self.task)
+            output = inner_model(tensor)
 
         if isinstance(output, dict):
             logits = output.get("output", output.get("logits", next(iter(output.values()))))
