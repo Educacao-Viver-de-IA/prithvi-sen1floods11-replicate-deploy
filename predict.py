@@ -160,13 +160,23 @@ class Predictor(BasePredictor):
         with torch.inference_mode():
             inner_model = getattr(self.task, 'model', self.task)
             output = inner_model(tensor)
+        print(f"[predict] output type={type(output).__name__} | attrs: {[a for a in dir(output) if not a.startswith('_')][:15]}", flush=True)
 
-        if isinstance(output, dict):
-            logits = output.get("output", output.get("logits", next(iter(output.values()))))
-        elif isinstance(output, (list, tuple)):
-            logits = output[0]
-        else:
-            logits = output
+        logits = None
+        for attr in ("output", "logits", "predictions", "out"):
+            if hasattr(output, attr):
+                v = getattr(output, attr)
+                if isinstance(v, torch.Tensor):
+                    logits = v
+                    print(f"[predict] extracted via .{attr}", flush=True)
+                    break
+        if logits is None:
+            if isinstance(output, dict):
+                logits = output.get("output", output.get("logits", next(iter(output.values()))))
+            elif isinstance(output, (list, tuple)):
+                logits = output[0]
+            else:
+                logits = output
 
         if logits.dim() == 4:
             pred = logits.argmax(dim=1).squeeze(0).cpu().numpy()
