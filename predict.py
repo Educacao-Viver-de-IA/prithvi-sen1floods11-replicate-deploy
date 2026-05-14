@@ -99,9 +99,11 @@ class Predictor(BasePredictor):
                 return
 
         self.task.eval()
+        for m in self.task.modules():
+            m.eval()
         if torch.cuda.is_available():
             self.task = self.task.cuda()
-        print(f"[setup] DONE (t={time.time()-t0:.1f}s)", flush=True)
+        print(f"[setup] DONE (t={time.time()-t0:.1f}s) | all modules eval()", flush=True)
         sys.stdout.flush()
 
     def _load_image(self, image_path: Path, image_size: int) -> torch.Tensor:
